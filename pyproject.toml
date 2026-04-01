@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iocinfo"
+version = "1.0.0"
+description = "IOC enrichment CLI — lookup IPs, domains, and hashes against threat intel sources"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.8"
+dependencies = [
+    "rich>=13.0",
+]
+
+[project.scripts]
+iocinfo = "iocinfo.main:main"
+
+[project.urls]
+Homepage = "https://github.com/homestarfuzzer/iocinfo"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["iocinfo*"]
