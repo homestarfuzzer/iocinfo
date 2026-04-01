@@ -34,8 +34,6 @@ pip install git+https://github.com/homestarfuzzer/iocinfo.git
 
 That's it. `iocinfo` is now a command on your system.
 
-> **Coming soon:** `pip install iocinfo` once published to PyPI.
-
 ---
 
 ## Quick Start
