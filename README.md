@@ -1,6 +1,6 @@
 # iocinfo
 
-> IOC enrichment from the command line. Look up IPs, domains, and hashes against multiple threat intel sources — color-coded, clearly labeled, no browser required.
+> IOC enrichment from the command line. Look up IPs, domains, and hashes against multiple threat intel sources. Color-coded, clearly labeled, no browser required.
 
 ```
 $ iocinfo 1.2.3.4
