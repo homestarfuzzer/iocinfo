@@ -26,6 +26,14 @@ $ iocinfo 1.2.3.4
 
 ---
 
+## Requirements
+
+- Python 3.8+
+- `rich` (installed automatically)
+- API keys optional; free sources work out of the box
+- 
+---
+
 ## Install
 
 ```bash
@@ -62,7 +70,7 @@ iocinfo --help
 
 ## Sources
 
-### Free — no API key needed
+### Free: no API key needed
 
 | Source | What it provides | Types |
 |---|---|---|
@@ -72,7 +80,7 @@ iocinfo --help
 | [URLhaus](https://urlhaus.abuse.ch) | Malware URLs, file type, signatures | Domain, Hash |
 | DNS | Live DNS resolution | Domain |
 
-### Paid — free API keys available
+### Paid: free API keys available
 
 | Service | What it provides | Types | Free Tier |
 |---|---|---|---|
@@ -92,7 +100,7 @@ Run the setup wizard once:
 iocinfo --setup
 ```
 
-This walks you through each source, shows where to get a free key, and saves to `~/.iocinfo/config.ini`. Skip any source you don't have — free sources work with zero config.
+This walks you through each source, shows where to get a free key, and saves to `~/.iocinfo/config.ini`. Skip any source you don't have; free sources work with zero config.
 
 ### Manual config
 
@@ -142,14 +150,6 @@ iocinfo <hash> --source vt urlhaus threatfox otx
 ```
 
 All flags: `vt` / `virustotal`, `abuseipdb`, `shodan`, `greynoise`, `otx`, `ipapi`, `ipinfo`, `urlhaus`, `threatfox`, `dns`
-
----
-
-## Requirements
-
-- Python 3.8+
-- `rich` (installed automatically)
-- API keys optional — free sources work out of the box
 
 ---
 
