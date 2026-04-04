@@ -31,7 +31,7 @@ $ iocinfo 1.2.3.4
 - Python 3.8+
 - `rich` (installed automatically)
 - API keys optional; free sources work out of the box
-- 
+
 ---
 
 ## Install
