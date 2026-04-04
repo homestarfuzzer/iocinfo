@@ -65,6 +65,32 @@ iocinfo 1.2.3.4 --source vt abuseipdb shodan
 # See all options
 iocinfo --help
 ```
+---
+
+## Output Colors
+
+| Color | Meaning |
+|---|---|
+| 🟢 Green | Clean / not flagged |
+| 🟡 Yellow | Low risk / suspicious |
+| 🟠 Orange | Medium risk |
+| 🔴 Red | High risk / malicious |
+
+VirusTotal: based on detection ratio (7/94 → red, 0/94 → green).
+AbuseIPDB: based on confidence score (0 → green, 75+ → red).
+
+---
+
+## Source Flags
+
+```bash
+iocinfo 1.2.3.4 --source virustotal
+iocinfo 1.2.3.4 --source abuseipdb shodan
+iocinfo evil.com --source vt threatfox urlhaus
+iocinfo <hash> --source vt urlhaus threatfox otx
+```
+
+All flags: `vt` / `virustotal`, `abuseipdb`, `shodan`, `greynoise`, `otx`, `ipapi`, `ipinfo`, `urlhaus`, `threatfox`, `dns`
 
 ---
 
@@ -123,33 +149,6 @@ api_key = YOUR_OTX_KEY_HERE
 [ipinfo]
 token = YOUR_IPINFO_TOKEN_HERE
 ```
-
----
-
-## Output Colors
-
-| Color | Meaning |
-|---|---|
-| 🟢 Green | Clean / not flagged |
-| 🟡 Yellow | Low risk / suspicious |
-| 🟠 Orange | Medium risk |
-| 🔴 Red | High risk / malicious |
-
-VirusTotal: based on detection ratio (7/94 → red, 0/94 → green).
-AbuseIPDB: based on confidence score (0 → green, 75+ → red).
-
----
-
-## Source Flags
-
-```bash
-iocinfo 1.2.3.4 --source virustotal
-iocinfo 1.2.3.4 --source abuseipdb shodan
-iocinfo evil.com --source vt threatfox urlhaus
-iocinfo <hash> --source vt urlhaus threatfox otx
-```
-
-All flags: `vt` / `virustotal`, `abuseipdb`, `shodan`, `greynoise`, `otx`, `ipapi`, `ipinfo`, `urlhaus`, `threatfox`, `dns`
 
 ---
 
