@@ -30,10 +30,9 @@ console = Console() if RICH else None
 VERSION = "1.1.0"
 
 BANNER = (
-    " _    ___   ___   _   _ __   ___  ___\n"
-    "(_)  / _ \\ / __| (_) | '_ \\ / _| / _ \\\n"
-    "| | | (_) | (__  | | | | | |  _| | (_) |\n"
-    "|_|  \\___/ \\___| |_| |_| |_|_|    \\___/"
+    " _    ___   ___   _    _ __    __   ___ \n"
+    "(_)  /   \\ / __| (_)  | '_ \\  |_  /   \\\n"
+    "|_|  \\___/ \\___| |_|  |_||_| |   \\___/ "
 )
 
 
@@ -174,8 +173,12 @@ def print_section(title: str, data: dict, color: str = "cyan"):
                 print(f"  {k}: {v}")
         return
 
+    # Dynamic key column width: just wide enough for the longest key
+    display_keys = [k for k in data if not k.startswith("_")]
+    key_width = max((len(k) for k in display_keys), default=8) + 2
+
     table = Table(box=None, show_header=False, padding=(0, 1))
-    table.add_column("Key", style="bold white", min_width=20)
+    table.add_column("Key", style="bold white", min_width=key_width, max_width=key_width + 4)
     table.add_column("Value", style="white")
 
     for k, v in data.items():
@@ -183,7 +186,14 @@ def print_section(title: str, data: dict, color: str = "cyan"):
             continue
         table.add_row(k, str(v))
 
-    console.print(Panel(table, title=f"[bold {color}]{title}[/]",
+    # OSC 8 hyperlink in title (supported by most modern terminals)
+    url = data.get("_url", "")
+    if url:
+        panel_title = f"[bold {color}][link={url}]{title}[/link][/]"
+    else:
+        panel_title = f"[bold {color}]{title}[/]"
+
+    console.print(Panel(table, title=panel_title,
                         border_style=color, expand=False, width=72))
 
 
@@ -674,6 +684,13 @@ def run_lookup(indicator: str, itype: str, cfg: configparser.ConfigParser,
     def want(*names) -> bool:
         return run_all or any(n in sources for n in names)
 
+    def explicit(*names) -> bool:
+        """True only when the user explicitly passed these source names via --source."""
+        return any(n in sources for n in names)
+
+    tf_url  = lambda i: f"https://threatfox.abuse.ch/browse/?search=ioc%3A{urllib.parse.quote(i)}"
+    uh_url  = lambda i: f"https://urlhaus.abuse.ch/browse.php?search={urllib.parse.quote(i)}"
+
     # ── IP ───────────────────────────────────────────────────────────────────
     if itype == "ip":
 
@@ -686,6 +703,7 @@ def run_lookup(indicator: str, itype: str, cfg: configparser.ConfigParser,
         if want("ipinfo"):
             d = lookup_ipinfo(indicator, ipinfo_token)
             if d:
+                d["_url"] = f"https://ipinfo.io/{indicator}"
                 sections.append(("🔍  IP Info  [ipinfo.io]", d, "cyan"))
 
         if want("rdap", "whois"):
@@ -698,6 +716,7 @@ def run_lookup(indicator: str, itype: str, cfg: configparser.ConfigParser,
             if d:
                 malware = d.get("Malware", "")
                 color   = "red" if malware else "green"
+                d["_url"] = tf_url(indicator)
                 sections.append(("☠️  ThreatFox  [abuse.ch]", d, color))
                 if malware:
                     verdicts.append(("☠️", f"ThreatFox: {malware}", "red"))
@@ -706,22 +725,24 @@ def run_lookup(indicator: str, itype: str, cfg: configparser.ConfigParser,
             d = lookup_urlhaus_url(indicator)
             if d:
                 color = "red" if "online" in str(d).lower() else "yellow"
+                d["_url"] = uh_url(indicator)
                 sections.append(("🔗  URLhaus  [abuse.ch]", d, color))
 
-        if want("abuseipdb") and abuse_key:
+        if abuse_key and want("abuseipdb"):
             d = lookup_abuseipdb(indicator, abuse_key)
             if "_error" in d:
                 errors.append(("AbuseIPDB", d["_error"]))
             elif d:
                 score = d.pop("_score", 0)
                 color = abuse_color(score)
+                d["_url"] = f"https://www.abuseipdb.com/check/{indicator}"
                 sections.append((f"🚨  AbuseIPDB  [score: {score}/100]", d, color))
                 if score > 0:
                     verdicts.append(("🚨", f"AbuseIPDB {score}/100", color))
-        elif want("abuseipdb") and not abuse_key:
+        elif not abuse_key and explicit("abuseipdb"):
             errors.append(("AbuseIPDB", "No API key -- run: iocinfo --setup"))
 
-        if want("virustotal", "vt") and vt_key:
+        if vt_key and want("virustotal", "vt"):
             d = lookup_virustotal(indicator, itype, vt_key)
             if "_error" in d:
                 errors.append(("VirusTotal", d["_error"]))
@@ -729,44 +750,48 @@ def run_lookup(indicator: str, itype: str, cfg: configparser.ConfigParser,
                 detected = d.pop("_detected", 0)
                 total    = d.pop("_total", 0)
                 color    = verdict_color(detected, total)
+                d["_url"] = f"https://www.virustotal.com/gui/ip-address/{indicator}"
                 sections.append((f"🦠  VirusTotal  [{detected}/{total} engines]", d, color))
                 if detected > 0:
                     verdicts.append(("🦠", f"VT {detected}/{total}", color))
-        elif want("virustotal", "vt") and not vt_key:
+        elif not vt_key and explicit("virustotal", "vt"):
             errors.append(("VirusTotal", "No API key -- run: iocinfo --setup"))
 
-        if want("shodan") and shodan_key:
+        if shodan_key and want("shodan"):
             d = lookup_shodan(indicator, shodan_key)
             if "_error" in d:
                 errors.append(("Shodan", d["_error"]))
             elif d:
                 color = "red" if "CVEs" in d else "blue"
+                d["_url"] = f"https://www.shodan.io/host/{indicator}"
                 sections.append(("🛰️  Shodan", d, color))
-        elif want("shodan") and not shodan_key:
+        elif not shodan_key and explicit("shodan"):
             errors.append(("Shodan", "No API key -- run: iocinfo --setup"))
 
-        if want("greynoise") and grey_key:
+        if grey_key and want("greynoise"):
             d = lookup_greynoise(indicator, grey_key)
             if "_error" in d:
                 errors.append(("GreyNoise", d["_error"]))
             elif d:
                 cls   = d.get("Classification", "")
                 color = "red" if cls == "malicious" else "green" if cls == "benign" else "yellow"
+                d["_url"] = f"https://viz.greynoise.io/ip/{indicator}"
                 sections.append((f"📡  GreyNoise  [{cls}]", d, color))
                 if cls == "malicious":
                     verdicts.append(("📡", "GreyNoise malicious", "red"))
                 elif d.get("Noise") == "Yes":
                     verdicts.append(("📡", "GreyNoise noise", "yellow"))
-        elif want("greynoise") and not grey_key:
+        elif not grey_key and explicit("greynoise"):
             errors.append(("GreyNoise", "No API key -- run: iocinfo --setup"))
 
-        if want("otx") and otx_key:
+        if otx_key and want("otx"):
             d = lookup_otx(indicator, itype, otx_key)
             if "_error" in d:
                 errors.append(("OTX", d["_error"]))
             elif d:
                 pulses = d.pop("_pulses", 0)
                 color  = "red" if pulses > 0 else "green"
+                d["_url"] = f"https://otx.alienvault.com/indicator/ip/{indicator}"
                 sections.append((f"👁️  AlienVault OTX  [{pulses} pulses]", d, color))
                 if pulses > 0:
                     verdicts.append(("👁️", f"OTX {pulses} pulses", color))
@@ -787,6 +812,7 @@ def run_lookup(indicator: str, itype: str, cfg: configparser.ConfigParser,
         if want("crtsh"):
             d = lookup_crtsh(indicator)
             if d:
+                d["_url"] = f"https://crt.sh/?q={urllib.parse.quote(indicator)}"
                 sections.append(("🔏  Cert Transparency  [crt.sh]", d, "cyan"))
 
         if want("threatfox"):
@@ -794,6 +820,7 @@ def run_lookup(indicator: str, itype: str, cfg: configparser.ConfigParser,
             if d:
                 malware = d.get("Malware", "")
                 color   = "red" if malware else "green"
+                d["_url"] = tf_url(indicator)
                 sections.append(("☠️  ThreatFox  [abuse.ch]", d, color))
                 if malware:
                     verdicts.append(("☠️", f"ThreatFox: {malware}", "red"))
@@ -801,9 +828,10 @@ def run_lookup(indicator: str, itype: str, cfg: configparser.ConfigParser,
         if want("urlhaus"):
             d = lookup_urlhaus_url(indicator)
             if d:
+                d["_url"] = uh_url(indicator)
                 sections.append(("🔗  URLhaus  [abuse.ch]", d, "yellow"))
 
-        if want("virustotal", "vt") and vt_key:
+        if vt_key and want("virustotal", "vt"):
             d = lookup_virustotal(indicator, itype, vt_key)
             if "_error" in d:
                 errors.append(("VirusTotal", d["_error"]))
@@ -811,19 +839,21 @@ def run_lookup(indicator: str, itype: str, cfg: configparser.ConfigParser,
                 detected = d.pop("_detected", 0)
                 total    = d.pop("_total", 0)
                 color    = verdict_color(detected, total)
+                d["_url"] = f"https://www.virustotal.com/gui/domain/{indicator}"
                 sections.append((f"🦠  VirusTotal  [{detected}/{total} engines]", d, color))
                 if detected > 0:
                     verdicts.append(("🦠", f"VT {detected}/{total}", color))
-        elif want("virustotal", "vt") and not vt_key:
+        elif not vt_key and explicit("virustotal", "vt"):
             errors.append(("VirusTotal", "No API key -- run: iocinfo --setup"))
 
-        if want("otx") and otx_key:
+        if otx_key and want("otx"):
             d = lookup_otx(indicator, itype, otx_key)
             if "_error" in d:
                 errors.append(("OTX", d["_error"]))
             elif d:
                 pulses = d.pop("_pulses", 0)
                 color  = "red" if pulses > 0 else "green"
+                d["_url"] = f"https://otx.alienvault.com/indicator/domain/{indicator}"
                 sections.append((f"👁️  AlienVault OTX  [{pulses} pulses]", d, color))
                 if pulses > 0:
                     verdicts.append(("👁️", f"OTX {pulses} pulses", color))
@@ -835,6 +865,7 @@ def run_lookup(indicator: str, itype: str, cfg: configparser.ConfigParser,
             d = lookup_urlhaus_hash(indicator)
             if d:
                 color = "red" if "malware" in str(d).lower() else "yellow"
+                d["_url"] = f"https://urlhaus.abuse.ch/browse.php?search={indicator}"
                 sections.append(("🔗  URLhaus  [abuse.ch]", d, color))
 
         if want("threatfox"):
@@ -842,11 +873,12 @@ def run_lookup(indicator: str, itype: str, cfg: configparser.ConfigParser,
             if d:
                 malware = d.get("Malware", "")
                 color   = "red" if malware else "green"
+                d["_url"] = tf_url(indicator)
                 sections.append(("☠️  ThreatFox  [abuse.ch]", d, color))
                 if malware:
                     verdicts.append(("☠️", f"ThreatFox: {malware}", "red"))
 
-        if want("virustotal", "vt") and vt_key:
+        if vt_key and want("virustotal", "vt"):
             d = lookup_virustotal(indicator, itype, vt_key)
             if "_error" in d:
                 errors.append(("VirusTotal", d["_error"]))
@@ -854,19 +886,21 @@ def run_lookup(indicator: str, itype: str, cfg: configparser.ConfigParser,
                 detected = d.pop("_detected", 0)
                 total    = d.pop("_total", 0)
                 color    = verdict_color(detected, total)
+                d["_url"] = f"https://www.virustotal.com/gui/file/{indicator}"
                 sections.append((f"🦠  VirusTotal  [{detected}/{total} engines]", d, color))
                 if detected > 0:
                     verdicts.append(("🦠", f"VT {detected}/{total}", color))
-        elif want("virustotal", "vt") and not vt_key:
+        elif not vt_key and explicit("virustotal", "vt"):
             errors.append(("VirusTotal", "No API key -- run: iocinfo --setup"))
 
-        if want("otx") and otx_key:
+        if otx_key and want("otx"):
             d = lookup_otx(indicator, itype, otx_key)
             if "_error" in d:
                 errors.append(("OTX", d["_error"]))
             elif d:
                 pulses = d.pop("_pulses", 0)
                 color  = "red" if pulses > 0 else "green"
+                d["_url"] = f"https://otx.alienvault.com/indicator/file/{indicator}"
                 sections.append((f"👁️  AlienVault OTX  [{pulses} pulses]", d, color))
                 if pulses > 0:
                     verdicts.append(("👁️", f"OTX {pulses} pulses", color))

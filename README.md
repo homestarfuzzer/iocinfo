@@ -85,7 +85,25 @@ Sections only appear when a source has data. Empty sources are silently skipped.
 pip install git+https://github.com/homestarfuzzer/iocinfo.git
 ```
 
+On Kali Linux and other systems with externally-managed Python environments, use `pipx` instead:
+
+```bash
+pipx install git+https://github.com/homestarfuzzer/iocinfo.git
+```
+
+To upgrade or reinstall:
+
+```bash
+pipx install --force git+https://github.com/homestarfuzzer/iocinfo.git
+```
+
 Python 3.8+ and `rich` are the only requirements. `rich` is installed automatically.
+
+After install, verify everything is working:
+
+```bash
+iocinfo --help
+```
 
 ---
 
