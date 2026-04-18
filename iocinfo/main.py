@@ -27,12 +27,10 @@ except ImportError:
 CONFIG_DIR = Path.home() / ".iocinfo"
 CONFIG_FILE = CONFIG_DIR / "config.ini"
 console = Console() if RICH else None
-VERSION = "1.1.0"
 
 BANNER = (
-    " _    ___   ___   _    _ __    __   ___ \n"
-    "(_)  /   \\ / __| (_)  | '_ \\  |_  /   \\\n"
-    "|_|  \\___/ \\___| |_|  |_||_| |   \\___/ "
+    "⠄ ⢀⡀ ⢀⣀ ⠄ ⣀⡀ ⣰⡁ ⢀⡀"
+    "⠇ ⠣⠜ ⠣⠤ ⠇ ⠇⠸ ⢸  ⠣⠜"
 )
 
 
