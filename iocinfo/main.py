@@ -27,6 +27,7 @@ except ImportError:
 CONFIG_DIR = Path.home() / ".iocinfo"
 CONFIG_FILE = CONFIG_DIR / "config.ini"
 console = Console() if RICH else None
+VERSION = "1.1.0"
 
 BANNER = (
     "⠄ ⢀⡀ ⢀⣀ ⠄ ⣀⡀ ⣰⡁ ⢀⡀"
