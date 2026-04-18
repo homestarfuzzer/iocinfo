@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-iocinfo — IOC enrichment tool
+iocinfo -- IOC enrichment tool
 Lookup IPs, domains, and hashes against free and paid threat intel sources.
 """
 
@@ -8,9 +8,9 @@ import argparse
 import configparser
 import ipaddress
 import json
-import os
 import re
 import sys
+import urllib.parse
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -19,47 +19,63 @@ try:
     from rich.console import Console
     from rich.panel import Panel
     from rich.table import Table
-    from rich import box
-    from rich.text import Text
     from rich.rule import Rule
-    from rich.columns import Columns
     RICH = True
 except ImportError:
     RICH = False
 
 CONFIG_DIR = Path.home() / ".iocinfo"
 CONFIG_FILE = CONFIG_DIR / "config.ini"
-
 console = Console() if RICH else None
+VERSION = "1.1.0"
+
+BANNER = (
+    " _    ___   ___   _   _ __   ___  ___\n"
+    "(_)  / _ \\ / __| (_) | '_ \\ / _| / _ \\\n"
+    "| | | (_) | (__  | | | | | |  _| | (_) |\n"
+    "|_|  \\___/ \\___| |_| |_| |_|_|    \\___/"
+)
 
 
-# ─── Helpers ────────────────────────────────────────────────────────────────
+# ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def detect_type(indicator: str) -> str:
-    """Auto-detect whether input is an IP, domain, or hash."""
+    """Auto-detect whether input is an IP, domain, hash, or URL."""
     indicator = indicator.strip()
-    # Hash detection
     if re.fullmatch(r"[a-fA-F0-9]{32}", indicator):
         return "md5"
     if re.fullmatch(r"[a-fA-F0-9]{40}", indicator):
         return "sha1"
     if re.fullmatch(r"[a-fA-F0-9]{64}", indicator):
         return "sha256"
-    # IP detection
     try:
         ipaddress.ip_address(indicator)
         return "ip"
     except ValueError:
         pass
-    # Domain/URL fallback
-    if re.match(r"^(https?://)", indicator):
+    if re.match(r"^https?://", indicator):
         return "url"
     return "domain"
 
 
 def fetch_json(url: str, headers: dict = None, timeout: int = 10) -> dict:
-    """Simple HTTP GET returning parsed JSON."""
+    """HTTP GET returning parsed JSON."""
     req = urllib.request.Request(url, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        return {"_error": f"HTTP {e.code}: {e.reason}"}
+    except Exception as e:
+        return {"_error": str(e)}
+
+
+def fetch_post(url: str, data: bytes,
+               content_type: str = "application/x-www-form-urlencoded",
+               timeout: int = 10) -> dict:
+    """HTTP POST returning parsed JSON."""
+    req = urllib.request.Request(url, data=data)
+    req.add_header("Content-Type", content_type)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
@@ -83,10 +99,49 @@ def get_key(cfg: configparser.ConfigParser, section: str, key: str) -> str:
         return ""
 
 
-# ─── Verdict coloring ───────────────────────────────────────────────────────
+def _clean(d: dict) -> dict:
+    """Strip empty, None, 'None', 'Unknown', and 'N/A' values."""
+    skip = {"", "None", "Unknown", "N/A", "none", "unknown", "n/a"}
+    return {k: v for k, v in d.items() if v is not None and str(v).strip() not in skip}
+
+
+# ─── RDAP helpers ─────────────────────────────────────────────────────────────
+
+def _rdap_fn(entities: list, *roles) -> str:
+    """Extract the fn (name) from the first entity matching any of the given roles."""
+    for e in entities:
+        if any(r in e.get("roles", []) for r in roles):
+            vc = e.get("vcardArray", [])
+            props = vc[1] if len(vc) >= 2 else []
+            for item in props:
+                if item and item[0] == "fn":
+                    return item[3]
+    return ""
+
+
+def _rdap_email(entities: list, *roles) -> str:
+    """Extract email from the first entity matching any of the given roles."""
+    for e in entities:
+        if any(r in e.get("roles", []) for r in roles):
+            vc = e.get("vcardArray", [])
+            props = vc[1] if len(vc) >= 2 else []
+            for item in props:
+                if item and item[0] == "email":
+                    return item[3]
+    return ""
+
+
+def _rdap_event(events: list, action: str) -> str:
+    """Return the date (YYYY-MM-DD) of the first event matching the given action."""
+    for e in events:
+        if e.get("eventAction") == action:
+            return e.get("eventDate", "")[:10]
+    return ""
+
+
+# ─── Verdict coloring ─────────────────────────────────────────────────────────
 
 def verdict_color(score: int, total: int) -> str:
-    """Return rich color string based on detection ratio."""
     if total == 0:
         return "dim"
     ratio = score / total
@@ -109,23 +164,24 @@ def abuse_color(score: int) -> str:
     return "red"
 
 
+# ─── Display ─────────────────────────────────────────────────────────────────
+
 def print_section(title: str, data: dict, color: str = "cyan"):
-    """Print a labeled section panel."""
     if not RICH:
         print(f"\n=== {title} ===")
         for k, v in data.items():
-            print(f"  {k}: {v}")
+            if not k.startswith("_"):
+                print(f"  {k}: {v}")
         return
 
     table = Table(box=None, show_header=False, padding=(0, 1))
-    table.add_column("Key", style="bold white", min_width=22)
+    table.add_column("Key", style="bold white", min_width=20)
     table.add_column("Value", style="white")
 
     for k, v in data.items():
-        if isinstance(v, str) and v.startswith("["):
-            table.add_row(k, Text(v, style="dim"))
-        else:
-            table.add_row(k, str(v))
+        if k.startswith("_"):
+            continue
+        table.add_row(k, str(v))
 
     console.print(Panel(table, title=f"[bold {color}]{title}[/]",
                         border_style=color, expand=False, width=72))
@@ -133,7 +189,7 @@ def print_section(title: str, data: dict, color: str = "cyan"):
 
 def print_error(source: str, msg: str):
     if RICH:
-        console.print(f"  [dim red]✗ {source}:[/] [dim]{msg}[/]")
+        console.print(f"  [dim red]x {source}:[/] [dim]{msg}[/]")
     else:
         print(f"  [ERROR] {source}: {msg}")
 
@@ -141,50 +197,64 @@ def print_error(source: str, msg: str):
 def print_header(indicator: str, itype: str):
     if RICH:
         console.print()
-        console.print(Rule(f"[bold white] iocinfo [/][dim]·[/] [bold cyan]{indicator}[/] [dim]({itype})[/]",
-                           style="bright_black"))
+        console.print(f"[bold cyan]{BANNER}[/]  [dim]v{VERSION}[/]")
+        console.print()
+        console.print(f"  [bold white]{indicator}[/]  [dim]({itype})[/]")
         console.print()
     else:
         print(f"\n{'='*60}")
-        print(f"  iocinfo  |  {indicator}  ({itype})")
+        print(f"  iocinfo v{VERSION}  |  {indicator}  ({itype})")
         print(f"{'='*60}")
 
 
-def print_verdict(label: str, score_str: str, color: str):
+def print_verdict_summary(verdicts: list):
+    """Print a compact one-line summary of scored sources (only called when verdicts exist)."""
+    if not verdicts:
+        return
     if RICH:
-        console.print(f"  [bold]Verdict:[/] [{color}]{label}[/]  [dim]{score_str}[/]")
+        parts = []
+        for emoji, label, color in verdicts:
+            parts.append(f"[{color}]{emoji} {label}[/{color}]")
+        console.print("  " + "  [dim]·[/]  ".join(parts))
         console.print()
     else:
-        print(f"  Verdict: {label}  {score_str}")
+        parts = [f"{emoji} {label}" for emoji, label, _ in verdicts]
+        print("  " + "  ·  ".join(parts))
 
 
-# ─── Free Sources (no API key) ──────────────────────────────────────────────
+# ─── Free Sources ─────────────────────────────────────────────────────────────
 
 def lookup_ip_api(ip: str) -> dict:
-    """ip-api.com — free geo/ASN, no key needed."""
-    data = fetch_json(f"http://ip-api.com/json/{ip}?fields=status,message,country,regionName,city,isp,org,as,proxy,hosting,query")
-    if data.get("_error"):
+    """ip-api.com -- free geo/ASN, no key needed."""
+    data = fetch_json(
+        f"http://ip-api.com/json/{ip}"
+        "?fields=status,message,country,regionName,city,isp,org,as,proxy,hosting,query"
+    )
+    if data.get("_error") or data.get("status") != "success":
         return {}
-    if data.get("status") != "success":
-        return {}
-    result = {
-        "IP":       data.get("query", ""),
-        "Location": f"{data.get('city', '')}, {data.get('regionName', '')}, {data.get('country', '')}",
-        "ISP":      data.get("isp", ""),
-        "Org":      data.get("org", ""),
-        "ASN":      data.get("as", ""),
-    }
+
     flags = []
     if data.get("proxy"):
         flags.append("PROXY")
     if data.get("hosting"):
         flags.append("HOSTING/VPS")
-    result["Flags"] = ", ".join(flags) if flags else "None"
-    return result
+
+    result = {
+        "IP":       data.get("query", ""),
+        "Location": ", ".join(filter(None, [
+            data.get("city", ""), data.get("regionName", ""), data.get("country", "")
+        ])),
+        "ISP":  data.get("isp", ""),
+        "Org":  data.get("org", ""),
+        "ASN":  data.get("as", ""),
+    }
+    if flags:
+        result["Flags"] = ", ".join(flags)
+    return _clean(result)
 
 
 def lookup_ipinfo(ip: str, token: str = "") -> dict:
-    """ipinfo.io — geo/ASN/org, free tier no key for basic."""
+    """ipinfo.io -- hostname/org/abuse, free tier."""
     url = f"https://ipinfo.io/{ip}/json"
     if token:
         url += f"?token={token}"
@@ -198,137 +268,215 @@ def lookup_ipinfo(ip: str, token: str = "") -> dict:
         result["Org/ASN"] = data["org"]
     if data.get("abuse", {}).get("email"):
         result["Abuse Contact"] = data["abuse"]["email"]
+    return _clean(result)
+
+
+def lookup_rdap_ip(ip: str) -> dict:
+    """RDAP/WHOIS for IPs via rdap.org -- free, no key."""
+    data = fetch_json(f"https://rdap.org/ip/{ip}", timeout=12)
+    if data.get("_error"):
+        return {}
+    entities = data.get("entities", [])
+    events   = data.get("events", [])
+
+    # Prefer CIDR notation from cidr0_cidrs if available
+    cidrs = data.get("cidr0_cidrs", [])
+    if cidrs:
+        c = cidrs[0]
+        prefix = c.get("v4prefix") or c.get("v6prefix", "")
+        length = c.get("length", "")
+        cidr_str = f"{prefix}/{length}" if prefix and length else ""
+    else:
+        start = data.get("startAddress", "")
+        end   = data.get("endAddress", "")
+        cidr_str = f"{start} - {end}" if start and end else ""
+
+    result = {
+        "Network":     data.get("name", ""),
+        "CIDR":        cidr_str,
+        "Country":     data.get("country", ""),
+        "Registered":  _rdap_event(events, "registration"),
+        "Org":         _rdap_fn(entities, "registrant", "administrative", "technical"),
+        "Abuse Email": _rdap_email(entities, "abuse"),
+    }
+    return _clean(result)
+
+
+def lookup_dns_full(domain: str) -> dict:
+    """Full DNS enrichment via Google DoH -- free, no key."""
+    result = {}
+    type_map = [("A", 1), ("MX", 15), ("NS", 2), ("TXT", 16)]
+    for rtype, rnum in type_map:
+        url = f"https://dns.google/resolve?name={urllib.parse.quote(domain)}&type={rtype}"
+        data = fetch_json(url, timeout=5)
+        if data.get("_error") or data.get("Status", 3) != 0:
+            continue
+        answers = [a["data"] for a in data.get("Answer", []) if a.get("type") == rnum]
+        if not answers:
+            continue
+        if rtype == "A":
+            result["A Records"] = ", ".join(answers[:6])
+        elif rtype == "MX":
+            hosts = [v.split()[-1].rstrip(".") for v in answers[:4]]
+            result["MX Records"] = ", ".join(hosts)
+        elif rtype == "NS":
+            result["NS Records"] = ", ".join(v.rstrip(".") for v in answers[:4])
+        elif rtype == "TXT":
+            txts = [v.strip('"')[:80] for v in answers[:2]]
+            result["TXT Records"] = " | ".join(txts)
     return result
+
+
+def lookup_rdap_domain(domain: str) -> dict:
+    """RDAP/WHOIS for domains via rdap.org -- free, no key."""
+    data = fetch_json(f"https://rdap.org/domain/{domain}", timeout=12)
+    if data.get("_error"):
+        return {}
+    entities    = data.get("entities", [])
+    events      = data.get("events", [])
+    nameservers = [ns.get("ldhName", "") for ns in data.get("nameservers", [])]
+    status      = [s for s in data.get("status", []) if s]
+
+    result = {
+        "Registrar":    _rdap_fn(entities, "registrar"),
+        "Registered":   _rdap_event(events, "registration"),
+        "Expires":      _rdap_event(events, "expiration"),
+        "Last Changed": _rdap_event(events, "last changed"),
+        "Nameservers":  ", ".join(ns for ns in nameservers[:4] if ns),
+        "Status":       ", ".join(status[:3]),
+    }
+    return _clean(result)
+
+
+def lookup_crtsh(domain: str) -> dict:
+    """Certificate Transparency logs via crt.sh -- free, no key."""
+    url = "https://crt.sh/?q=%25." + urllib.parse.quote(domain) + "&output=json"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+        certs = json.loads(raw)
+    except Exception:
+        return {}
+
+    if not isinstance(certs, list) or not certs:
+        return {}
+
+    sample = certs[:500]
+    total  = len(sample)
+    dates  = sorted(c.get("not_before", "")[:10] for c in sample if c.get("not_before"))
+    # Extract org from issuer_name "C=US, O=Let's Encrypt, CN=R3" -> "Let's Encrypt"
+    issuers = []
+    seen    = set()
+    for c in sample:
+        raw_issuer = c.get("issuer_name", "")
+        for part in raw_issuer.split(","):
+            part = part.strip()
+            if part.startswith("O="):
+                name = part[2:].strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    issuers.append(name)
+                break
+
+    result = {
+        "Certs Found":  str(total) + ("+" if total == 500 else ""),
+        "Earliest":     dates[0] if dates else "",
+        "Most Recent":  dates[-1] if dates else "",
+        "Issuers":      ", ".join(issuers[:3]),
+    }
+    return _clean(result)
 
 
 def lookup_urlhaus_hash(hash_val: str) -> dict:
-    """URLhaus hash lookup — free, no key."""
-    url = "https://urlhaus-api.abuse.ch/v1/payload/"
-    data_bytes = f"md5_hash={hash_val}".encode() if len(hash_val) == 32 else f"sha256_hash={hash_val}".encode()
-    req = urllib.request.Request(url, data=data_bytes)
-    req.add_header("Content-Type", "application/x-www-form-urlencoded")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-    except Exception:
+    """URLhaus hash lookup -- free, no key."""
+    if len(hash_val) == 32:
+        body = f"md5_hash={hash_val}".encode()
+    else:
+        body = f"sha256_hash={hash_val}".encode()
+    data = fetch_post("https://urlhaus-api.abuse.ch/v1/payload/", body)
+    if data.get("_error") or data.get("query_status") == "no_results":
         return {}
-
-    if data.get("query_status") == "no_results":
-        return {"URLhaus": "No results found (not in URLhaus database)"}
-
     result = {
-        "URLhaus Status": data.get("query_status", ""),
-        "File Type":      data.get("file_type", ""),
-        "File Size":      f"{data.get('file_size', '')} bytes" if data.get("file_size") else "",
-        "Signature":      data.get("signature") or "Unknown",
-        "First Seen":     data.get("firstseen", ""),
-        "Last Seen":      data.get("lastseen", ""),
-        "Downloads":      str(data.get("download_count", "")),
+        "File Type":  data.get("file_type", ""),
+        "File Size":  f"{data.get('file_size')} bytes" if data.get("file_size") else "",
+        "Signature":  data.get("signature", ""),
+        "First Seen": data.get("firstseen", ""),
+        "Last Seen":  data.get("lastseen", ""),
+        "Downloads":  str(data.get("download_count", "")) if data.get("download_count") else "",
+        "URLs Seen":  str(len(data.get("urls", []))) if data.get("urls") else "",
     }
-    urls = data.get("urls", [])
-    if urls:
-        result["Associated URLs"] = str(len(urls))
-    return {k: v for k, v in result.items() if v}
+    return _clean(result)
 
 
-def lookup_urlhaus_url(url_val: str) -> dict:
-    """URLhaus URL/domain lookup — free, no key."""
-    data_bytes = f"url={urllib.parse.quote(url_val)}".encode() if "http" in url_val else f"host={url_val}".encode()
-
-    endpoint = "https://urlhaus-api.abuse.ch/v1/url/" if "http" in url_val else "https://urlhaus-api.abuse.ch/v1/host/"
-    req = urllib.request.Request(endpoint, data=data_bytes)
-    req.add_header("Content-Type", "application/x-www-form-urlencoded")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-    except Exception:
+def lookup_urlhaus_url(val: str) -> dict:
+    """URLhaus URL/domain/IP lookup -- free, no key."""
+    if val.startswith("http"):
+        endpoint = "https://urlhaus-api.abuse.ch/v1/url/"
+        body = f"url={urllib.parse.quote(val)}".encode()
+    else:
+        endpoint = "https://urlhaus-api.abuse.ch/v1/host/"
+        body = f"host={val}".encode()
+    data = fetch_post(endpoint, body)
+    if data.get("_error") or data.get("query_status") in ("no_results", "invalid_url"):
         return {}
-
-    if data.get("query_status") in ("no_results", "invalid_url"):
-        return {"URLhaus": "Not found in URLhaus database"}
-
     result = {
-        "URLhaus Status": data.get("query_status", ""),
-        "Threat":         data.get("threat", ""),
-        "Date Added":     data.get("date_added", ""),
-        "URLs (host)":    str(len(data.get("urls", []))),
+        "Status": data.get("query_status", ""),
+        "Threat": data.get("threat", ""),
+        "Added":  data.get("date_added", ""),
+        "URLs":   str(len(data.get("urls", []))) if data.get("urls") else "",
     }
-    return {k: v for k, v in result.items() if v}
-
-
-def lookup_dns(domain: str) -> dict:
-    """Basic DNS resolution using socket — no API needed."""
-    import socket
-    result = {}
-    try:
-        addrs = socket.getaddrinfo(domain, None)
-        ips = list(dict.fromkeys([a[4][0] for a in addrs]))
-        result["Resolves To"] = ", ".join(ips[:5])
-    except Exception:
-        result["DNS"] = "Could not resolve"
-    return result
+    return _clean(result)
 
 
 def lookup_threatfox_hash(hash_val: str) -> dict:
-    """ThreatFox hash lookup — free, no key."""
+    """ThreatFox hash lookup -- free, no key."""
     payload = json.dumps({"query": "search_ioc", "search_term": hash_val}).encode()
-    req = urllib.request.Request("https://threatfox-api.abuse.ch/api/v1/", data=payload)
-    req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-    except Exception:
+    data = fetch_post("https://threatfox-api.abuse.ch/api/v1/", payload, "application/json")
+    if data.get("_error") or data.get("query_status") == "no_results":
         return {}
-
-    if data.get("query_status") == "no_results":
-        return {"ThreatFox": "Not found in ThreatFox database"}
-
     iocs = data.get("data", [])
     if not iocs:
         return {}
-
-    ioc = iocs[0]
-    return {
-        "ThreatFox Malware":  ioc.get("malware_printable", ""),
-        "ThreatFox IOC Type": ioc.get("ioc_type_desc", ""),
-        "Confidence":         f"{ioc.get('confidence_level', '')}%",
-        "Reporter":           ioc.get("reporter", ""),
-        "First Seen":         ioc.get("first_seen", ""),
-        "Tags":               ", ".join(ioc.get("tags") or []) or "None",
+    ioc  = iocs[0]
+    tags = [t for t in (ioc.get("tags") or []) if t]
+    result = {
+        "Malware":    ioc.get("malware_printable", ""),
+        "IOC Type":   ioc.get("ioc_type_desc", ""),
+        "Confidence": f"{ioc.get('confidence_level', '')}%",
+        "Reporter":   ioc.get("reporter", ""),
+        "First Seen": ioc.get("first_seen", ""),
     }
+    if tags:
+        result["Tags"] = ", ".join(tags)
+    return _clean(result)
 
 
 def lookup_threatfox_ip_domain(indicator: str) -> dict:
-    """ThreatFox IP/domain lookup — free, no key."""
+    """ThreatFox IP/domain lookup -- free, no key."""
     payload = json.dumps({"query": "search_ioc", "search_term": indicator}).encode()
-    req = urllib.request.Request("https://threatfox-api.abuse.ch/api/v1/", data=payload)
-    req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-    except Exception:
+    data = fetch_post("https://threatfox-api.abuse.ch/api/v1/", payload, "application/json")
+    if data.get("_error") or data.get("query_status") == "no_results":
         return {}
-
-    if data.get("query_status") == "no_results":
-        return {"ThreatFox": "Not found"}
-
     iocs = data.get("data", [])
     if not iocs:
         return {}
-
-    ioc = iocs[0]
-    return {
-        "ThreatFox Malware":  ioc.get("malware_printable", ""),
-        "Confidence":         f"{ioc.get('confidence_level', '')}%",
-        "First Seen":         ioc.get("first_seen", ""),
-        "Tags":               ", ".join(ioc.get("tags") or []) or "None",
+    ioc  = iocs[0]
+    tags = [t for t in (ioc.get("tags") or []) if t]
+    result = {
+        "Malware":    ioc.get("malware_printable", ""),
+        "Confidence": f"{ioc.get('confidence_level', '')}%",
+        "First Seen": ioc.get("first_seen", ""),
     }
+    if tags:
+        result["Tags"] = ", ".join(tags)
+    return _clean(result)
 
 
-# ─── Paid Sources (API key required) ────────────────────────────────────────
+# ─── Paid Sources ─────────────────────────────────────────────────────────────
 
 def lookup_virustotal(indicator: str, itype: str, api_key: str) -> dict:
-    """VirusTotal — requires free API key."""
+    """VirusTotal -- requires free API key."""
     if itype == "ip":
         url = f"https://www.virustotal.com/api/v3/ip_addresses/{indicator}"
     elif itype == "domain":
@@ -351,26 +499,36 @@ def lookup_virustotal(indicator: str, itype: str, api_key: str) -> dict:
     detected   = malicious + suspicious
 
     result = {
-        "Detections":  f"{detected}/{total}",
-        "Malicious":   str(malicious),
-        "Suspicious":  str(suspicious),
-        "Undetected":  str(stats.get("undetected", 0)),
+        "Detections": f"{detected}/{total}",
+        "Malicious":  str(malicious),
+        "Suspicious": str(suspicious),
+        "Undetected": str(stats.get("undetected", 0)),
     }
 
     if itype in ("md5", "sha1", "sha256"):
-        result["File Type"]    = attrs.get("type_description", "")
-        result["File Size"]    = f"{attrs.get('size', '')} bytes" if attrs.get("size") else ""
-        result["Magic"]        = attrs.get("magic", "")
-        result["First Seen"]   = attrs.get("first_submission_date", "")
-        result["Times Submitted"] = str(attrs.get("times_submitted", ""))
+        if attrs.get("type_description"):
+            result["File Type"] = attrs["type_description"]
+        if attrs.get("size"):
+            result["File Size"] = f"{attrs['size']} bytes"
+        if attrs.get("magic"):
+            result["Magic"] = attrs["magic"]
+        if attrs.get("first_submission_date"):
+            result["First Seen"] = str(attrs["first_submission_date"])
+        if attrs.get("times_submitted"):
+            result["Times Submitted"] = str(attrs["times_submitted"])
     elif itype == "domain":
-        result["Registrar"]    = attrs.get("registrar", "")
-        result["Creation Date"] = attrs.get("creation_date", "")
-        result["Categories"]   = ", ".join(attrs.get("categories", {}).values()) or "None"
+        if attrs.get("registrar"):
+            result["Registrar"] = attrs["registrar"]
+        cats = list(attrs.get("categories", {}).values())
+        if cats:
+            result["Categories"] = ", ".join(cats)
     elif itype == "ip":
-        result["Country"]      = attrs.get("country", "")
-        result["Network"]      = attrs.get("network", "")
-        result["AS Owner"]     = attrs.get("as_owner", "")
+        if attrs.get("country"):
+            result["Country"] = attrs["country"]
+        if attrs.get("network"):
+            result["Network"] = attrs["network"]
+        if attrs.get("as_owner"):
+            result["AS Owner"] = attrs["as_owner"]
 
     result["_detected"] = detected
     result["_total"]    = total
@@ -378,30 +536,41 @@ def lookup_virustotal(indicator: str, itype: str, api_key: str) -> dict:
 
 
 def lookup_abuseipdb(ip: str, api_key: str) -> dict:
-    """AbuseIPDB — requires free API key."""
+    """AbuseIPDB -- requires free API key."""
     url = f"https://api.abuseipdb.com/api/v2/check?ipAddress={ip}&maxAgeInDays=90&verbose"
     data = fetch_json(url, headers={"Key": api_key, "Accept": "application/json"})
     if data.get("_error"):
         return {"_error": data["_error"]}
 
-    d = data.get("data", {})
+    d     = data.get("data", {})
     score = d.get("abuseConfidenceScore", 0)
-    return {
-        "Abuse Score":      f"{score}/100",
-        "Total Reports":    str(d.get("totalReports", 0)),
-        "Distinct Users":   str(d.get("numDistinctUsers", 0)),
-        "Last Reported":    d.get("lastReportedAt", "Never") or "Never",
-        "Usage Type":       d.get("usageType", ""),
-        "ISP":              d.get("isp", ""),
-        "Domain":           d.get("domain", ""),
-        "Tor Node":         "Yes" if d.get("isTor") else "No",
-        "Whitelisted":      "Yes" if d.get("isWhitelisted") else "No",
-        "_score":           score,
+    last  = d.get("lastReportedAt") or ""
+
+    result = {
+        "Abuse Score":    f"{score}/100",
+        "Total Reports":  str(d.get("totalReports", 0)),
+        "Distinct Users": str(d.get("numDistinctUsers", 0)),
+        "Usage Type":     d.get("usageType", ""),
+        "ISP":            d.get("isp", ""),
+        "Domain":         d.get("domain", ""),
     }
+    if last:
+        result["Last Reported"] = last
+    # Only surface positive boolean flags
+    if d.get("isTor"):
+        result["Tor Node"] = "Yes"
+    if d.get("isWhitelisted"):
+        result["Whitelisted"] = "Yes"
+
+    result["_score"] = score
+    # Clean non-internal keys
+    cleaned = {k: v for k, v in result.items()
+               if k.startswith("_") or (v is not None and str(v).strip() not in {"", "None", "N/A"})}
+    return cleaned
 
 
 def lookup_shodan(ip: str, api_key: str) -> dict:
-    """Shodan — requires API key."""
+    """Shodan -- requires API key."""
     data = fetch_json(f"https://api.shodan.io/shodan/host/{ip}?key={api_key}")
     if data.get("_error"):
         return {"_error": data["_error"]}
@@ -410,47 +579,52 @@ def lookup_shodan(ip: str, api_key: str) -> dict:
     hostnames = data.get("hostnames", [])
     tags      = data.get("tags", [])
     vulns     = list(data.get("vulns", {}).keys())
+    os_val    = data.get("os")
 
-    result = {
-        "Open Ports":  ", ".join(str(p) for p in sorted(ports)) or "None",
-        "Hostnames":   ", ".join(hostnames) or "None",
-        "OS":          data.get("os", "Unknown") or "Unknown",
-        "Tags":        ", ".join(tags) or "None",
-        "Last Update": data.get("last_update", ""),
-    }
+    result = {}
+    if ports:
+        result["Open Ports"] = ", ".join(str(p) for p in sorted(ports))
+    if hostnames:
+        result["Hostnames"] = ", ".join(hostnames)
+    if os_val:
+        result["OS"] = os_val
+    if tags:
+        result["Tags"] = ", ".join(tags)
+    if data.get("last_update"):
+        result["Last Update"] = data["last_update"]
     if vulns:
-        result["CVEs"] = ", ".join(vulns[:10])
+        cve_str = ", ".join(vulns[:10])
         if len(vulns) > 10:
-            result["CVEs"] += f" (+{len(vulns)-10} more)"
+            cve_str += f" (+{len(vulns) - 10} more)"
+        result["CVEs"] = cve_str
     return result
 
 
 def lookup_greynoise(ip: str, api_key: str) -> dict:
-    """GreyNoise — requires API key (free community tier available)."""
-    data = fetch_json(
-        f"https://api.greynoise.io/v3/community/{ip}",
-        headers={"key": api_key}
-    )
+    """GreyNoise -- requires API key (free community tier)."""
+    headers = {"key": api_key} if api_key else {}
+    data = fetch_json(f"https://api.greynoise.io/v3/community/{ip}", headers=headers)
     if data.get("_error"):
-        # Try community endpoint without key for basic verdict
-        data = fetch_json(f"https://api.greynoise.io/v3/community/{ip}")
-        if data.get("_error"):
-            return {"_error": data["_error"]}
+        return {"_error": data["_error"]}
 
-    result = {
-        "Noise":        "Yes" if data.get("noise") else "No",
-        "RIOT":         "Yes" if data.get("riot") else "No",
-        "Classification": data.get("classification", "unknown"),
-        "Name":         data.get("name", ""),
-        "Link":         data.get("link", ""),
-        "Last Seen":    data.get("last_seen", ""),
-        "Message":      data.get("message", ""),
-    }
-    return {k: v for k, v in result.items() if v}
+    result = {}
+    if data.get("noise"):
+        result["Noise"] = "Yes"
+    if data.get("riot"):
+        result["RIOT"] = "Yes"
+    cls = data.get("classification", "")
+    if cls:
+        result["Classification"] = cls
+    name = data.get("name", "")
+    if name and name.lower() not in ("unknown", ""):
+        result["Name"] = name
+    if data.get("last_seen"):
+        result["Last Seen"] = data["last_seen"]
+    return result
 
 
 def lookup_otx(indicator: str, itype: str, api_key: str) -> dict:
-    """AlienVault OTX — requires free API key."""
+    """AlienVault OTX -- requires free API key."""
     type_map = {"ip": "IPv4", "domain": "domain", "md5": "file",
                 "sha1": "file", "sha256": "file", "url": "URL"}
     otx_type = type_map.get(itype, "")
@@ -464,228 +638,268 @@ def lookup_otx(indicator: str, itype: str, api_key: str) -> dict:
         return {"_error": data["_error"]}
 
     pulses = data.get("pulse_info", {}).get("count", 0)
-    result = {
-        "OTX Pulse Count": str(pulses),
-    }
+    result = {"Pulse Count": str(pulses)}
+
     if itype == "ip":
         rep = data.get("reputation", {})
-        if rep:
-            result["Reputation Score"] = str(rep.get("threat_score", ""))
-            result["Activities"]       = ", ".join(rep.get("activities", {}).keys()) or "None"
+        if rep.get("threat_score"):
+            result["Threat Score"] = str(rep["threat_score"])
+        acts = list(rep.get("activities", {}).keys())
+        if acts:
+            result["Activities"] = ", ".join(acts)
+
+    result["_pulses"] = pulses
     return result
 
 
-# ─── Main lookup orchestrator ────────────────────────────────────────────────
-
-import urllib.parse
-
+# ─── Main lookup orchestrator ─────────────────────────────────────────────────
 
 def run_lookup(indicator: str, itype: str, cfg: configparser.ConfigParser,
                sources: list, verbose: bool = False):
 
-    print_header(indicator, itype)
-
-    vt_key       = get_key(cfg, "virustotal",  "api_key")
-    abuse_key    = get_key(cfg, "abuseipdb",   "api_key")
-    shodan_key   = get_key(cfg, "shodan",      "api_key")
-    grey_key     = get_key(cfg, "greynoise",   "api_key")
-    otx_key      = get_key(cfg, "otx",         "api_key")
-    ipinfo_token = get_key(cfg, "ipinfo",      "token")
+    vt_key       = get_key(cfg, "virustotal", "api_key")
+    abuse_key    = get_key(cfg, "abuseipdb",  "api_key")
+    shodan_key   = get_key(cfg, "shodan",     "api_key")
+    grey_key     = get_key(cfg, "greynoise",  "api_key")
+    otx_key      = get_key(cfg, "otx",        "api_key")
+    ipinfo_token = get_key(cfg, "ipinfo",     "token")
 
     run_all = not sources or "all" in sources
 
-    # ── IP enrichment ────────────────────────────────────────────────────────
+    # Collect results before printing so we can show the verdict summary up top
+    sections = []   # list of (title, data, color)
+    verdicts = []   # list of (emoji, label, color)
+    errors   = []   # list of (source, msg)
+
+    def want(*names) -> bool:
+        return run_all or any(n in sources for n in names)
+
+    # ── IP ───────────────────────────────────────────────────────────────────
     if itype == "ip":
 
-        # Free: ip-api.com
-        if run_all or "ipapi" in sources:
-            data = lookup_ip_api(indicator)
-            if data:
-                flags = data.get("Flags", "None")
-                color = "red" if flags != "None" else "green"
-                print_section("🌐  Geolocation  [ip-api.com]", data, color)
-            else:
-                print_error("ip-api.com", "No data returned")
+        if want("ipapi"):
+            d = lookup_ip_api(indicator)
+            if d:
+                color = "red" if d.get("Flags") else "green"
+                sections.append(("🌐  Geolocation  [ip-api.com]", d, color))
 
-        # Free: ipinfo.io
-        if run_all or "ipinfo" in sources:
-            data = lookup_ipinfo(indicator, ipinfo_token)
-            if data:
-                print_section("🔍  IP Info  [ipinfo.io]", data, "cyan")
+        if want("ipinfo"):
+            d = lookup_ipinfo(indicator, ipinfo_token)
+            if d:
+                sections.append(("🔍  IP Info  [ipinfo.io]", d, "cyan"))
 
-        # Free: ThreatFox
-        if run_all or "threatfox" in sources:
-            data = lookup_threatfox_ip_domain(indicator)
-            if data:
-                color = "red" if "ThreatFox Malware" in data else "green"
-                print_section("☠️   ThreatFox  [abuse.ch]", data, color)
+        if want("rdap", "whois"):
+            d = lookup_rdap_ip(indicator)
+            if d:
+                sections.append(("🏢  RDAP / WHOIS  [rdap.org]", d, "cyan"))
 
-        # Free: URLhaus host lookup
-        if run_all or "urlhaus" in sources:
-            data = lookup_urlhaus_url(indicator)
-            if data:
-                color = "red" if "online" in str(data).lower() else "dim"
-                print_section("🔗  URLhaus  [abuse.ch]", data, color)
+        if want("threatfox"):
+            d = lookup_threatfox_ip_domain(indicator)
+            if d:
+                malware = d.get("Malware", "")
+                color   = "red" if malware else "green"
+                sections.append(("☠️  ThreatFox  [abuse.ch]", d, color))
+                if malware:
+                    verdicts.append(("☠️", f"ThreatFox: {malware}", "red"))
 
-        # Paid: AbuseIPDB
-        if (run_all or "abuseipdb" in sources) and abuse_key:
-            data = lookup_abuseipdb(indicator, abuse_key)
-            if "_error" in data:
-                print_error("AbuseIPDB", data["_error"])
-            elif data:
-                score = data.pop("_score", 0)
+        if want("urlhaus"):
+            d = lookup_urlhaus_url(indicator)
+            if d:
+                color = "red" if "online" in str(d).lower() else "yellow"
+                sections.append(("🔗  URLhaus  [abuse.ch]", d, color))
+
+        if want("abuseipdb") and abuse_key:
+            d = lookup_abuseipdb(indicator, abuse_key)
+            if "_error" in d:
+                errors.append(("AbuseIPDB", d["_error"]))
+            elif d:
+                score = d.pop("_score", 0)
                 color = abuse_color(score)
-                print_section(f"🚨  AbuseIPDB  [score: {score}/100]", data, color)
-        elif "abuseipdb" in sources and not abuse_key:
-            print_error("AbuseIPDB", "No API key configured — run: iocinfo --setup")
+                sections.append((f"🚨  AbuseIPDB  [score: {score}/100]", d, color))
+                if score > 0:
+                    verdicts.append(("🚨", f"AbuseIPDB {score}/100", color))
+        elif want("abuseipdb") and not abuse_key:
+            errors.append(("AbuseIPDB", "No API key -- run: iocinfo --setup"))
 
-        # Paid: VirusTotal
-        if (run_all or "virustotal" in sources or "vt" in sources) and vt_key:
-            data = lookup_virustotal(indicator, itype, vt_key)
-            if "_error" in data:
-                print_error("VirusTotal", data["_error"])
-            elif data:
-                detected = data.pop("_detected", 0)
-                total    = data.pop("_total", 0)
+        if want("virustotal", "vt") and vt_key:
+            d = lookup_virustotal(indicator, itype, vt_key)
+            if "_error" in d:
+                errors.append(("VirusTotal", d["_error"]))
+            elif d:
+                detected = d.pop("_detected", 0)
+                total    = d.pop("_total", 0)
                 color    = verdict_color(detected, total)
-                print_section(f"🦠  VirusTotal  [{detected}/{total} engines]", data, color)
-        elif ("virustotal" in sources or "vt" in sources) and not vt_key:
-            print_error("VirusTotal", "No API key configured — run: iocinfo --setup")
+                sections.append((f"🦠  VirusTotal  [{detected}/{total} engines]", d, color))
+                if detected > 0:
+                    verdicts.append(("🦠", f"VT {detected}/{total}", color))
+        elif want("virustotal", "vt") and not vt_key:
+            errors.append(("VirusTotal", "No API key -- run: iocinfo --setup"))
 
-        # Paid: Shodan
-        if (run_all or "shodan" in sources) and shodan_key:
-            data = lookup_shodan(indicator, shodan_key)
-            if "_error" in data:
-                print_error("Shodan", data["_error"])
-            elif data:
-                has_vulns = "CVEs" in data
-                color = "red" if has_vulns else "blue"
-                print_section("🛰️   Shodan", data, color)
-        elif "shodan" in sources and not shodan_key:
-            print_error("Shodan", "No API key configured — run: iocinfo --setup")
+        if want("shodan") and shodan_key:
+            d = lookup_shodan(indicator, shodan_key)
+            if "_error" in d:
+                errors.append(("Shodan", d["_error"]))
+            elif d:
+                color = "red" if "CVEs" in d else "blue"
+                sections.append(("🛰️  Shodan", d, color))
+        elif want("shodan") and not shodan_key:
+            errors.append(("Shodan", "No API key -- run: iocinfo --setup"))
 
-        # Paid: GreyNoise
-        if (run_all or "greynoise" in sources) and grey_key:
-            data = lookup_greynoise(indicator, grey_key)
-            if "_error" in data:
-                print_error("GreyNoise", data["_error"])
-            elif data:
-                cls = data.get("Classification", "unknown")
+        if want("greynoise") and grey_key:
+            d = lookup_greynoise(indicator, grey_key)
+            if "_error" in d:
+                errors.append(("GreyNoise", d["_error"]))
+            elif d:
+                cls   = d.get("Classification", "")
                 color = "red" if cls == "malicious" else "green" if cls == "benign" else "yellow"
-                print_section(f"📡  GreyNoise  [{cls}]", data, color)
-        elif "greynoise" in sources and not grey_key:
-            print_error("GreyNoise", "No API key configured — run: iocinfo --setup")
+                sections.append((f"📡  GreyNoise  [{cls}]", d, color))
+                if cls == "malicious":
+                    verdicts.append(("📡", "GreyNoise malicious", "red"))
+                elif d.get("Noise") == "Yes":
+                    verdicts.append(("📡", "GreyNoise noise", "yellow"))
+        elif want("greynoise") and not grey_key:
+            errors.append(("GreyNoise", "No API key -- run: iocinfo --setup"))
 
-        # Paid: OTX
-        if (run_all or "otx" in sources) and otx_key:
-            data = lookup_otx(indicator, itype, otx_key)
-            if "_error" in data:
-                print_error("OTX", data["_error"])
-            elif data:
-                pulses = int(data.get("OTX Pulse Count", 0))
+        if want("otx") and otx_key:
+            d = lookup_otx(indicator, itype, otx_key)
+            if "_error" in d:
+                errors.append(("OTX", d["_error"]))
+            elif d:
+                pulses = d.pop("_pulses", 0)
                 color  = "red" if pulses > 0 else "green"
-                print_section(f"👁️   AlienVault OTX  [{pulses} pulses]", data, color)
+                sections.append((f"👁️  AlienVault OTX  [{pulses} pulses]", d, color))
+                if pulses > 0:
+                    verdicts.append(("👁️", f"OTX {pulses} pulses", color))
 
-    # ── Domain enrichment ────────────────────────────────────────────────────
+    # ── Domain ───────────────────────────────────────────────────────────────
     elif itype == "domain":
 
-        # Free: DNS resolution
-        if run_all or "dns" in sources:
-            data = lookup_dns(indicator)
-            if data:
-                print_section("🌐  DNS Resolution", data, "cyan")
+        if want("dns"):
+            d = lookup_dns_full(indicator)
+            if d:
+                sections.append(("🌐  DNS Records  [dns.google]", d, "cyan"))
 
-        # Free: ThreatFox
-        if run_all or "threatfox" in sources:
-            data = lookup_threatfox_ip_domain(indicator)
-            if data:
-                color = "red" if "ThreatFox Malware" in data else "green"
-                print_section("☠️   ThreatFox  [abuse.ch]", data, color)
+        if want("rdap", "whois"):
+            d = lookup_rdap_domain(indicator)
+            if d:
+                sections.append(("🏢  WHOIS  [rdap.org]", d, "cyan"))
 
-        # Free: URLhaus
-        if run_all or "urlhaus" in sources:
-            data = lookup_urlhaus_url(indicator)
-            if data:
-                print_section("🔗  URLhaus  [abuse.ch]", data, "yellow")
+        if want("crtsh"):
+            d = lookup_crtsh(indicator)
+            if d:
+                sections.append(("🔏  Cert Transparency  [crt.sh]", d, "cyan"))
 
-        # Paid: VirusTotal
-        if (run_all or "virustotal" in sources or "vt" in sources) and vt_key:
-            data = lookup_virustotal(indicator, itype, vt_key)
-            if "_error" in data:
-                print_error("VirusTotal", data["_error"])
-            elif data:
-                detected = data.pop("_detected", 0)
-                total    = data.pop("_total", 0)
+        if want("threatfox"):
+            d = lookup_threatfox_ip_domain(indicator)
+            if d:
+                malware = d.get("Malware", "")
+                color   = "red" if malware else "green"
+                sections.append(("☠️  ThreatFox  [abuse.ch]", d, color))
+                if malware:
+                    verdicts.append(("☠️", f"ThreatFox: {malware}", "red"))
+
+        if want("urlhaus"):
+            d = lookup_urlhaus_url(indicator)
+            if d:
+                sections.append(("🔗  URLhaus  [abuse.ch]", d, "yellow"))
+
+        if want("virustotal", "vt") and vt_key:
+            d = lookup_virustotal(indicator, itype, vt_key)
+            if "_error" in d:
+                errors.append(("VirusTotal", d["_error"]))
+            elif d:
+                detected = d.pop("_detected", 0)
+                total    = d.pop("_total", 0)
                 color    = verdict_color(detected, total)
-                print_section(f"🦠  VirusTotal  [{detected}/{total} engines]", data, color)
+                sections.append((f"🦠  VirusTotal  [{detected}/{total} engines]", d, color))
+                if detected > 0:
+                    verdicts.append(("🦠", f"VT {detected}/{total}", color))
+        elif want("virustotal", "vt") and not vt_key:
+            errors.append(("VirusTotal", "No API key -- run: iocinfo --setup"))
 
-        # Paid: OTX
-        if (run_all or "otx" in sources) and otx_key:
-            data = lookup_otx(indicator, itype, otx_key)
-            if "_error" in data:
-                print_error("OTX", data["_error"])
-            elif data:
-                pulses = int(data.get("OTX Pulse Count", 0))
+        if want("otx") and otx_key:
+            d = lookup_otx(indicator, itype, otx_key)
+            if "_error" in d:
+                errors.append(("OTX", d["_error"]))
+            elif d:
+                pulses = d.pop("_pulses", 0)
                 color  = "red" if pulses > 0 else "green"
-                print_section(f"👁️   AlienVault OTX  [{pulses} pulses]", data, color)
+                sections.append((f"👁️  AlienVault OTX  [{pulses} pulses]", d, color))
+                if pulses > 0:
+                    verdicts.append(("👁️", f"OTX {pulses} pulses", color))
 
-    # ── Hash enrichment ──────────────────────────────────────────────────────
+    # ── Hash ─────────────────────────────────────────────────────────────────
     elif itype in ("md5", "sha1", "sha256"):
 
-        # Free: URLhaus
-        if run_all or "urlhaus" in sources:
-            data = lookup_urlhaus_hash(indicator)
-            if data:
-                color = "red" if "malware" in str(data).lower() else "dim"
-                print_section("🔗  URLhaus  [abuse.ch]", data, color)
+        if want("urlhaus"):
+            d = lookup_urlhaus_hash(indicator)
+            if d:
+                color = "red" if "malware" in str(d).lower() else "yellow"
+                sections.append(("🔗  URLhaus  [abuse.ch]", d, color))
 
-        # Free: ThreatFox
-        if run_all or "threatfox" in sources:
-            data = lookup_threatfox_hash(indicator)
-            if data:
-                color = "red" if "ThreatFox Malware" in data else "green"
-                print_section("☠️   ThreatFox  [abuse.ch]", data, color)
+        if want("threatfox"):
+            d = lookup_threatfox_hash(indicator)
+            if d:
+                malware = d.get("Malware", "")
+                color   = "red" if malware else "green"
+                sections.append(("☠️  ThreatFox  [abuse.ch]", d, color))
+                if malware:
+                    verdicts.append(("☠️", f"ThreatFox: {malware}", "red"))
 
-        # Paid: VirusTotal
-        if (run_all or "virustotal" in sources or "vt" in sources) and vt_key:
-            data = lookup_virustotal(indicator, itype, vt_key)
-            if "_error" in data:
-                print_error("VirusTotal", data["_error"])
-            elif data:
-                detected = data.pop("_detected", 0)
-                total    = data.pop("_total", 0)
+        if want("virustotal", "vt") and vt_key:
+            d = lookup_virustotal(indicator, itype, vt_key)
+            if "_error" in d:
+                errors.append(("VirusTotal", d["_error"]))
+            elif d:
+                detected = d.pop("_detected", 0)
+                total    = d.pop("_total", 0)
                 color    = verdict_color(detected, total)
-                print_section(f"🦠  VirusTotal  [{detected}/{total} engines]", data, color)
+                sections.append((f"🦠  VirusTotal  [{detected}/{total} engines]", d, color))
+                if detected > 0:
+                    verdicts.append(("🦠", f"VT {detected}/{total}", color))
+        elif want("virustotal", "vt") and not vt_key:
+            errors.append(("VirusTotal", "No API key -- run: iocinfo --setup"))
 
-        # Paid: OTX
-        if (run_all or "otx" in sources) and otx_key:
-            data = lookup_otx(indicator, itype, otx_key)
-            if "_error" in data:
-                print_error("OTX", data["_error"])
-            elif data:
-                pulses = int(data.get("OTX Pulse Count", 0))
+        if want("otx") and otx_key:
+            d = lookup_otx(indicator, itype, otx_key)
+            if "_error" in d:
+                errors.append(("OTX", d["_error"]))
+            elif d:
+                pulses = d.pop("_pulses", 0)
                 color  = "red" if pulses > 0 else "green"
-                print_section(f"👁️   AlienVault OTX  [{pulses} pulses]", data, color)
+                sections.append((f"👁️  AlienVault OTX  [{pulses} pulses]", d, color))
+                if pulses > 0:
+                    verdicts.append(("👁️", f"OTX {pulses} pulses", color))
+
+    # ── Output ───────────────────────────────────────────────────────────────
+    print_header(indicator, itype)
+    print_verdict_summary(verdicts)
+
+    for title, data, color in sections:
+        print_section(title, data, color)
+
+    for source, msg in errors:
+        print_error(source, msg)
 
     if RICH:
         console.print(Rule(style="bright_black"))
         console.print()
 
 
-# ─── Setup wizard ────────────────────────────────────────────────────────────
+# ─── Setup wizard ─────────────────────────────────────────────────────────────
 
 def setup_wizard():
-    print("\n  iocinfo — API Key Setup")
-    print("  " + "─" * 40)
+    print("\n  iocinfo -- API Key Setup")
+    print("  " + "-" * 40)
     print("  Press ENTER to skip any key you don't have yet.\n")
 
     keys = {
-        "virustotal":  ("VirusTotal",       "api_key",  "https://www.virustotal.com/gui/join-us"),
-        "abuseipdb":   ("AbuseIPDB",        "api_key",  "https://www.abuseipdb.com/register"),
-        "shodan":      ("Shodan",           "api_key",  "https://account.shodan.io/register"),
-        "greynoise":   ("GreyNoise",        "api_key",  "https://viz.greynoise.io/signup"),
-        "otx":         ("AlienVault OTX",   "api_key",  "https://otx.alienvault.com/accounts/signup"),
-        "ipinfo":      ("ipinfo.io (opt.)", "token",    "https://ipinfo.io/signup"),
+        "virustotal": ("VirusTotal",       "api_key", "https://www.virustotal.com/gui/join-us"),
+        "abuseipdb":  ("AbuseIPDB",        "api_key", "https://www.abuseipdb.com/register"),
+        "shodan":     ("Shodan",           "api_key", "https://account.shodan.io/register"),
+        "greynoise":  ("GreyNoise",        "api_key", "https://viz.greynoise.io/signup"),
+        "otx":        ("AlienVault OTX",   "api_key", "https://otx.alienvault.com/accounts/signup"),
+        "ipinfo":     ("ipinfo.io (opt.)", "token",   "https://ipinfo.io/signup"),
     }
 
     cfg = configparser.ConfigParser()
@@ -694,31 +908,28 @@ def setup_wizard():
 
     for section, (name, key, signup_url) in keys.items():
         existing = get_key(cfg, section, key)
-        prompt = f"  {name} [{signup_url}]\n  Key"
+        prompt   = f"  {name}\n  Signup: {signup_url}\n  Key"
         if existing:
-            prompt += f" (current: {existing[:6]}...{'ENTER to keep'})"
+            prompt += f" (current: {existing[:6]}...  ENTER to keep)"
         val = input(f"{prompt}: ").strip()
         if val:
             if section not in cfg:
                 cfg[section] = {}
             cfg[section][key] = val
-        elif existing:
-            pass  # keep existing
+        print()
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_FILE, "w") as f:
         cfg.write(f)
+    print(f"  Config saved to {CONFIG_FILE}\n")
 
-    print(f"\n  ✓ Config saved to {CONFIG_FILE}\n")
 
-
-# ─── CLI entry point ─────────────────────────────────────────────────────────
+# ─── Help screen ─────────────────────────────────────────────────────────────
 
 def print_help():
-    """Rich color-coded help screen."""
     if not RICH:
-        print("""
-iocinfo v1.0.0 — IOC enrichment CLI
+        print(f"""
+iocinfo v{VERSION} -- IOC enrichment CLI
 
 USAGE:
   iocinfo <indicator> [options]
@@ -738,7 +949,9 @@ OPTIONS:
 FREE SOURCES (no API key needed):
   ipapi           Geolocation, ASN, ISP, proxy/hosting flags     [IP]
   ipinfo          Hostname, org, abuse contact                   [IP]
-  dns             Live DNS resolution                            [Domain]
+  rdap / whois    RDAP/WHOIS registration data                   [IP, Domain]
+  dns             Full DNS records (A, MX, NS, TXT)              [Domain]
+  crtsh           Certificate Transparency logs                  [Domain]
   threatfox       Malware family, confidence, tags               [IP, Domain, Hash]
   urlhaus         Malware URLs, signatures, file type            [Domain, Hash]
 
@@ -750,7 +963,7 @@ PAID SOURCES (free API keys available):
   otx             Pulse count, threat actor tagging              [IP, Domain, Hash]
 
 EXAMPLES:
-  iocinfo 8.8.8.8
+  iocinfo 185.220.101.35
   iocinfo evil.com
   iocinfo d41d8cd98f00b204e9800998ecf8427e
   iocinfo 1.2.3.4 --source abuseipdb
@@ -760,20 +973,12 @@ EXAMPLES:
         return
 
     console.print()
-    console.print(Panel.fit(
-        "[bold white]iocinfo[/] [dim]v1.0.0[/]  ·  [dim]IOC enrichment CLI[/]",
-        border_style="bright_black"
-    ))
+    console.print(f"[bold cyan]{BANNER}[/]  [dim]v{VERSION}[/]")
     console.print()
 
     console.print("  [bold cyan]USAGE[/]")
     console.print("    [white]iocinfo[/] [green]<indicator>[/] [dim]\\[options][/]")
     console.print("    [white]iocinfo[/] [yellow]--setup[/]")
-    console.print("    [white]iocinfo[/] [yellow]--help[/]")
-    console.print()
-
-    console.print("  [bold cyan]ARGUMENTS[/]")
-    console.print(f"    [green]{'indicator':<18}[/] IP address, domain, or hash [dim](auto-detected)[/]")
     console.print()
 
     console.print("  [bold cyan]OPTIONS[/]")
@@ -788,33 +993,35 @@ EXAMPLES:
         console.print(f"    [yellow]{flag:<18}[/] {desc}")
     console.print()
 
-    console.print("  [bold green]FREE SOURCES[/] [dim]— no API key needed[/]")
+    console.print("  [bold green]FREE SOURCES[/] [dim]-- no API key needed[/]")
     free = [
-        ("ipapi",     "Geolocation, ASN, ISP, proxy/hosting flags",  "IP"),
-        ("ipinfo",    "Hostname, org, abuse contact",                 "IP"),
-        ("dns",       "Live DNS resolution",                          "Domain"),
-        ("threatfox", "Malware family, confidence score, tags",       "IP · Domain · Hash"),
-        ("urlhaus",   "Malware URLs, signatures, file type",          "Domain · Hash"),
+        ("ipapi",        "Geolocation, ASN, ISP, proxy/hosting flags",    "IP"),
+        ("ipinfo",       "Hostname, org, abuse contact",                  "IP"),
+        ("rdap / whois", "RDAP/WHOIS registration data",                  "IP · Domain"),
+        ("dns",          "Full DNS records (A, MX, NS, TXT)",             "Domain"),
+        ("crtsh",        "Certificate Transparency logs",                 "Domain"),
+        ("threatfox",    "Malware family, confidence score, tags",        "IP · Domain · Hash"),
+        ("urlhaus",      "Malware URLs, signatures, file type",           "Domain · Hash"),
     ]
     for name, desc, types in free:
-        console.print(f"    [bold green]{name:<18}[/] {desc:<44} [dim cyan]{types}[/]")
+        console.print(f"    [bold green]{name:<18}[/] {desc:<46} [dim cyan]{types}[/]")
     console.print()
 
-    console.print("  [bold yellow]PAID SOURCES[/] [dim]— free keys available  →  run: iocinfo --setup[/]")
+    console.print("  [bold yellow]PAID SOURCES[/] [dim]-- free keys available  ->  run: iocinfo --setup[/]")
     paid = [
-        ("vt / virustotal", "Detection ratio across 90+ AV engines",     "IP · Domain · Hash"),
-        ("abuseipdb",       "Abuse confidence score, report history",     "IP"),
-        ("shodan",          "Open ports, banners, CVEs, hostnames",       "IP"),
-        ("greynoise",       "Internet noise classification",              "IP"),
-        ("otx",             "Pulse count, threat actor tagging",          "IP · Domain · Hash"),
+        ("vt / virustotal", "Detection ratio across 90+ AV engines",      "IP · Domain · Hash"),
+        ("abuseipdb",       "Abuse confidence score, report history",      "IP"),
+        ("shodan",          "Open ports, banners, CVEs, hostnames",        "IP"),
+        ("greynoise",       "Internet noise classification",               "IP"),
+        ("otx",             "Pulse count, threat actor tagging",           "IP · Domain · Hash"),
     ]
     for name, desc, types in paid:
-        console.print(f"    [bold yellow]{name:<18}[/] {desc:<44} [dim cyan]{types}[/]")
+        console.print(f"    [bold yellow]{name:<18}[/] {desc:<46} [dim cyan]{types}[/]")
     console.print()
 
     console.print("  [bold cyan]EXAMPLES[/]")
     examples = [
-        "iocinfo 8.8.8.8",
+        "iocinfo 185.220.101.35",
         "iocinfo evil.com",
         "iocinfo d41d8cd98f00b204e9800998ecf8427e",
         "iocinfo 1.2.3.4 --source abuseipdb",
@@ -827,6 +1034,8 @@ EXAMPLES:
     console.print()
 
 
+# ─── CLI entry point ─────────────────────────────────────────────────────────
+
 def main():
     if "-h" in sys.argv or "--help" in sys.argv:
         print_help()
@@ -837,7 +1046,7 @@ def main():
     parser.add_argument("--source", nargs="+", metavar="SOURCE")
     parser.add_argument("--type", choices=["ip", "domain", "md5", "sha1", "sha256"])
     parser.add_argument("--setup", action="store_true")
-    parser.add_argument("--version", action="version", version="iocinfo 1.0.0")
+    parser.add_argument("--version", action="version", version=f"iocinfo {VERSION}")
     parser.add_argument("-h", "--help", action="store_true", default=False)
 
     args = parser.parse_args()
@@ -856,7 +1065,7 @@ def main():
     cfg       = load_config()
 
     if not RICH:
-        print("\n  Tip: Install \'rich\' for colored output: pip install rich\n")
+        print("\n  Tip: Install 'rich' for colored output:  pip install rich\n")
 
     run_lookup(indicator, itype, cfg, sources)
 

@@ -1,36 +1,81 @@
 # iocinfo
 
-> IOC enrichment from the command line. Look up IPs, domains, and hashes against multiple threat intel sources. Color coded, clearly labeled, no browser required.
+IOC enrichment from the command line. Drop in an IP, domain, or hash and get threat intel back instantly, color-coded and clearly labeled. No browser needed, no dashboards to navigate.
+
+Built for SOC analysts and threat hunters who want answers fast.
 
 ```
-$ iocinfo 1.2.3.4
-
-────────────────── iocinfo · 1.2.3.4 (ip) ──────────────────
-
- 🌐  Geolocation  [ip-api.com]
- ╭──────────────────────────────────────────────────────╮
- │ IP           1.2.3.4                                 │
- │ Location     Amsterdam, North Holland, Netherlands   │
- │ ISP          Some Provider BV                        │
- │ ASN          AS12345 Some-ASN                        │
- │ Flags        HOSTING/VPS                             │
- ╰──────────────────────────────────────────────────────╯
-
- 🚨  AbuseIPDB  [score: 87/100]          (shown in red)
- ╭──────────────────────────────────────────────────────╮
- │ Abuse Score  87/100                                  │
- │ Reports      412                                     │
- │ Last Report  2026-04-01T03:00:00Z                    │
- ╰──────────────────────────────────────────────────────╯
+pip install git+https://github.com/homestarfuzzer/iocinfo.git
 ```
 
 ---
 
-## Requirements
+## Demo
 
-- Python 3.8+
-- `rich` (installed automatically)
-- API keys optional; free sources work out of the box
+```
+$ iocinfo 185.220.101.35
+
+ _             _       __
+|_) _  _ _|_ | ) _   / _|_
+| \(/_|_> |_ |_)|_)  \_ |_  v1.1
+
+  185.220.101.35  (ip)
+
+  🚨 AbuseIPDB 100/100  ·  🦠 VT 8/94  ·  📡 GreyNoise malicious  ·  ☠️ ThreatFox: TrickBot
+
+ ╭─── 🌐  Geolocation  [ip-api.com] ─────────────────────────────╮
+ │ IP          185.220.101.35                                     │
+ │ Location    Frankfurt, Hesse, Germany                          │
+ │ ISP         Tor Project                                        │
+ │ ASN         AS60729 Relayon UG                                 │
+ │ Flags       HOSTING/VPS                                        │
+ ╰────────────────────────────────────────────────────────────────╯
+
+ ╭─── 🏢  RDAP / WHOIS  [rdap.org] ──────────────────────────────╮
+ │ Network     RELAYON                                            │
+ │ CIDR        185.220.96.0/21                                    │
+ │ Country     DE                                                 │
+ │ Registered  2019-04-05                                         │
+ │ Org         Relayon UG                                         │
+ │ Abuse Email abuse@relayon.org                                  │
+ ╰────────────────────────────────────────────────────────────────╯
+
+ ╭─── 🚨  AbuseIPDB  [score: 100/100] ───────────────────────────╮  (red)
+ │ Abuse Score    100/100                                         │
+ │ Total Reports  4,821                                           │
+ │ Distinct Users 312                                             │
+ │ Last Reported  2026-04-18T06:12:00Z                            │
+ │ Usage Type     Tor Exit Node                                   │
+ │ ISP            Tor Project                                     │
+ │ Tor Node       Yes                                             │
+ ╰────────────────────────────────────────────────────────────────╯
+
+ ╭─── 🦠  VirusTotal  [8/94 engines] ────────────────────────────╮  (red)
+ │ Detections  8/94                                               │
+ │ Malicious   8                                                  │
+ │ Suspicious  0                                                  │
+ │ Undetected  86                                                 │
+ │ Country     DE                                                 │
+ │ Network     185.220.96.0/21                                    │
+ │ AS Owner    Relayon UG                                         │
+ ╰────────────────────────────────────────────────────────────────╯
+
+ ╭─── 📡  GreyNoise  [malicious] ────────────────────────────────╮  (red)
+ │ Noise          Yes                                             │
+ │ Classification malicious                                       │
+ │ Last Seen      2026-04-17                                      │
+ ╰────────────────────────────────────────────────────────────────╯
+
+ ╭─── 🛰️  Shodan ─────────────────────────────────────────────────╮
+ │ Open Ports  443, 9001, 9030                                    │
+ │ Tags        tor                                                │
+ │ Last Update 2026-04-17T21:30:00                                │
+ ╰────────────────────────────────────────────────────────────────╯
+
+──────────────────────────────────────────────────────────────────
+```
+
+Sections only appear when a source has data. Empty sources are silently skipped.
 
 ---
 
@@ -40,57 +85,48 @@ $ iocinfo 1.2.3.4
 pip install git+https://github.com/homestarfuzzer/iocinfo.git
 ```
 
-That's it. `iocinfo` is now a command on your system.
+Python 3.8+ and `rich` are the only requirements. `rich` is installed automatically.
 
 ---
 
 ## Quick Start
 
+Type is auto-detected. Just pass the indicator:
+
 ```bash
-# Look up an IP (type is auto-detected)
-iocinfo 8.8.8.8
-
-# Look up a domain
-iocinfo evil-domain.com
-
-# Look up a hash (MD5, SHA1, or SHA256)
-iocinfo d41d8cd98f00b204e9800998ecf8427e
-
-# Query specific sources only
-iocinfo 1.2.3.4 --source abuseipdb
-
-# Query multiple specific sources
-iocinfo 1.2.3.4 --source vt abuseipdb shodan
-
-# See all options
-iocinfo --help
+iocinfo 185.220.101.35         # IP
+iocinfo evil-domain.com        # domain
+iocinfo d41d8cd98f00b204e9800998ecf8427e   # hash (MD5, SHA1, or SHA256)
 ```
+
+Query specific sources only:
+
+```bash
+iocinfo 1.2.3.4 --source abuseipdb
+iocinfo 1.2.3.4 --source vt abuseipdb shodan
+iocinfo evil.com --source vt threatfox urlhaus crtsh
+```
+
+Run the setup wizard once to configure API keys:
+
+```bash
+iocinfo --setup
+```
+
 ---
 
-## Output Colors
+## Output
+
+Sections are color-coded by severity:
 
 | Color | Meaning |
 |---|---|
-| 🟢 Green | Clean / not flagged |
-| 🟡 Yellow | Low risk / suspicious |
-| 🟠 Orange | Medium risk |
-| 🔴 Red | High risk / malicious |
+| Green | Clean or not flagged |
+| Yellow | Low risk or suspicious |
+| Orange | Medium risk |
+| Red | High risk or confirmed malicious |
 
-VirusTotal: based on detection ratio (7/94 → red, 0/94 → green).
-AbuseIPDB: based on confidence score (0 → green, 75+ → red).
-
----
-
-## Source Flags
-
-```bash
-iocinfo 1.2.3.4 --source virustotal
-iocinfo 1.2.3.4 --source abuseipdb shodan
-iocinfo evil.com --source vt threatfox urlhaus
-iocinfo <hash> --source vt urlhaus threatfox otx
-```
-
-All flags: `vt` / `virustotal`, `abuseipdb`, `shodan`, `greynoise`, `otx`, `ipapi`, `ipinfo`, `urlhaus`, `threatfox`, `dns`
+A compact verdict line appears at the top when any source flags the indicator. Sections only render when a source returned actual data, so you never see empty panels or "not found" noise.
 
 ---
 
@@ -102,9 +138,11 @@ All flags: `vt` / `virustotal`, `abuseipdb`, `shodan`, `greynoise`, `otx`, `ipap
 |---|---|---|
 | [ip-api.com](https://ip-api.com) | Geolocation, ASN, ISP, proxy/hosting flags | IP |
 | [ipinfo.io](https://ipinfo.io) | Hostname, org, ASN | IP |
+| [rdap.org](https://rdap.org) | RDAP/WHOIS registration data, abuse contacts | IP, Domain |
+| [dns.google](https://dns.google) | Full DNS records: A, MX, NS, TXT | Domain |
+| [crt.sh](https://crt.sh) | Certificate Transparency logs, issuer history | Domain |
 | [ThreatFox](https://threatfox.abuse.ch) | Malware family, confidence score, tags | IP, Domain, Hash |
 | [URLhaus](https://urlhaus.abuse.ch) | Malware URLs, file type, signatures | Domain, Hash |
-| DNS | Live DNS resolution | Domain |
 
 ### Paid: free API keys available
 
@@ -120,13 +158,11 @@ All flags: `vt` / `virustotal`, `abuseipdb`, `shodan`, `greynoise`, `otx`, `ipap
 
 ## API Key Setup
 
-Run the setup wizard once:
-
 ```bash
 iocinfo --setup
 ```
 
-This walks you through each source, shows where to get a free key, and saves to `~/.iocinfo/config.ini`. Skip any source you don't have; free sources work with zero config.
+The wizard walks through each service, shows the signup URL, and saves to `~/.iocinfo/config.ini`. Skip any you don't have yet. Free sources work with zero config.
 
 ### Manual config
 
@@ -150,9 +186,7 @@ api_key = YOUR_OTX_KEY_HERE
 token = YOUR_IPINFO_TOKEN_HERE
 ```
 
----
-
-## Getting Free API Keys
+### Free signup links
 
 | Service | Signup | Daily Limit |
 |---|---|---|
@@ -164,8 +198,21 @@ token = YOUR_IPINFO_TOKEN_HERE
 
 ---
 
+## Source Flags
+
+```bash
+iocinfo 185.220.101.35 --source virustotal
+iocinfo 185.220.101.35 --source abuseipdb shodan
+iocinfo evil.com --source vt threatfox urlhaus crtsh
+iocinfo <hash> --source vt urlhaus threatfox otx
+```
+
+All source names: `vt` / `virustotal`, `abuseipdb`, `shodan`, `greynoise`, `otx`, `ipapi`, `ipinfo`, `rdap` / `whois`, `dns`, `crtsh`, `urlhaus`, `threatfox`
+
+---
+
 ## License
 
-MIT — do whatever you want with it.
+MIT. Do whatever you want with it.
 
 Built by [homestarfuzzer](https://homestarfuzzer.github.io) · [GitHub](https://github.com/homestarfuzzer/iocinfo)
